@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>加速度で叩く！ わにわにパニック</title>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.8.0/p5.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.1.3/socket.io.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: sans-serif;
+      background-color: #f0f0f0;
+    }
+
+    h1 {
+      color: #333;
+    }
+
+    canvas {
+      border: 5px solid #6c3b1c;
+      background-color: #a0d468;
+      border-radius: 8px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    #game-info {
+      margin: 15px 0;
+      text-align: center;
+      font-size: 1.1em;
+      color: #555;
+    }
+
+    #game-info div {
+      margin-bottom: 5px;
+    }
+
+    #connect,
+    #retry-button {
+      padding: 10px 20px;
+      font-size: 1.2em;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+
+    #connect:hover,
+    #retry-button:hover {
+      background-color: #45a049;
+    }
+
+    #score {
+      font-size: 2.5em;
+      font-weight: bold;
+      color: #45a049;
+      display: inline-block;
+      min-width: 40px;
+    }
+
+    #debug-log {
+      display: none;
+    }
+
+    /* ゲームオーバー画面 */
+    #game-over-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
+      text-align: center;
+      z-index: 100;
+    }
+
+    #final-score {
+      font-size: 4em;
+      margin: 20px 0;
+      color: #ffdd57;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>🐊 傾けて狙え！ スマホでワニたたき！🐊</h1>
+
+  <div id="game-info">
+    <div>あなたのID: <span id="myid"></span></div>
+    <button id="connect">ゲーム開始</button>
+    <div>スコア: <span id="score">0</span></div>
+  </div>
+
+  <div id="game-over-overlay" style="display: none;">
+    <h2>ゲーム終了！</h2>
+    <p>最終スコア:</p>
+    <div id="final-score">0</div>
+    <button id="retry-button">もう一度プレイ</button>
+  </div>
+
+  <div id="debug-log"><strong>[デバッグログ]</strong><br></div>
+
+  <script>
+    let socket = io.connect();
+
+    // プレイヤーIDをセッションストレージで保持
+    let myid = sessionStorage.getItem('clientId');
+    if (!myid) {
+      myid = Math.random().toString(36).substring(2, 15);
+      sessionStorage.setItem('clientId', myid);
+    }
+
+    // ログ出力
+    function logToScreen(message) {
+      console.log(message);
+    }
+
+    document.querySelector("#myid").innerHTML = myid;
+    document.querySelector("#score").innerHTML = 0;
+    logToScreen("あなたのID: " + myid);
+
+    // ===== ゲーム定数 =====
+    const NUM_TARGETS = 5;
+    const CANVAS_WIDTH = 500;
+    const CANVAS_HEIGHT = 500;
+    const TARGET_Y = 400;
+    const TARGET_SIZE = 60;
+    const CURSOR_SIZE = 80;
+    const SMASH_ANIMATION_DURATION = 100;
+    const HIT_TOLERANCE = 20;
+    const RESULT_DISPLAY_DURATION = 800;
+    const GAME_DURATION = 30; // ゲーム時間（秒）
+    const COUNTDOWN_DURATION = 3; // ゲーム開始前カウントダウン（秒）
+
+    // 難易度調整用
+    const TARGET_DURATION_MIN = 800;
+    const TARGET_DURATION_MAX = 1500;
+    const SPAWN_INTERVAL_MIN = 300;
+    const SPAWN_INTERVAL_MAX = 1000;
+
+    // ===== ゲーム状態管理 =====
+    const GAMESTATE = {
+      WAITING: 'WAITING',
+      COUNTDOWN: 'COUNTDOWN',
+      PLAYING: 'PLAYING',
+      GAMEOVER: 'GAMEOVER'
+    };
+
+    // ===== ゲーム変数 =====
+    let score = 0;
+    let cursorX = 250;
+    let gamma = 0;
+    let targetActive = false;
+    let activeTargetIndex = -1;
+    let targetTimer = null;
+    let targetPositions = [];
+    let isSmashingAnimation = false;
+    let smashedTargetIndex = -1;
+    let resultMessage = '';
+    let resultTimer = null;
+    let messageColor = 255;
+    let gameState = GAMESTATE.WAITING;
+    let startTime = 0;
+    let countdownTime = GAME_DURATION;
+    let startCountdownStartTime = 0;
+
+    // ===== 画像 =====
+    let img_hammer_up, img_hammer_down, img_wani_open, img_wani_close;
+
+    function preload() {
+      img_hammer_up = loadImage('pikopiko_hummer_up.png');
+      img_hammer_down = loadImage('pikopiko_hummer_down.png');
+      img_wani_open = loadImage('wani_open.png');
+      img_wani_close = loadImage('wani_close.png');
+    }
+
+    // ===== ボタン処理 =====
+    const btn = document.querySelector("#connect");
+    const retryBtn = document.querySelector("#retry-button");
+    const gameOverOverlay = document.querySelector("#game-over-overlay");
+
+    btn.addEventListener("click", () => {
+      socket.emit("join", "game");
+      btn.style.display = 'none';
+      initGame();
+    });
+
+    retryBtn.addEventListener("click", () => {
+      gameOverOverlay.style.display = 'none';
+      document.querySelector("#score").innerHTML = 0;
+      initGame();
+    });
+
+    // ===== ゲーム初期化 =====
+    function initGame() {
+      logToScreen("ゲーム初期化開始");
+      score = 0;
+      document.querySelector("#score").innerHTML = score;
+      targetActive = false;
+      activeTargetIndex = -1;
+      smashedTargetIndex = -1;
+      if (targetTimer) clearTimeout(targetTimer);
+      gameState = GAMESTATE.COUNTDOWN;
+      startCountdownStartTime = millis();
+      logToScreen("カウントダウン開始");
+    }
+
+    // ===== ゲーム開始 =====
+    function startGame() {
+      logToScreen("ゲーム本編開始！");
+      gameState = GAMESTATE.PLAYING;
+      startTime = millis();
+      countdownTime = GAME_DURATION;
+      spawnNewTarget();
+    }
+
+    // ===== ゲームオーバー =====
+    function gameOver() {
+      gameState = GAMESTATE.GAMEOVER;
+      if (targetTimer) clearTimeout(targetTimer);
+      targetActive = false;
+      activeTargetIndex = -1;
+      document.querySelector("#final-score").innerHTML = score;
+      gameOverOverlay.style.display = 'flex';
+      logToScreen("ゲームオーバー！ 最終スコア: " + score);
+    }
+
+    // ===== Socket.io イベント =====
+    socket.on("sensor", data => {
+      gamma = parseFloat(data.g);
+    });
+
+    socket.on("smash", () => {
+      if (gameState === GAMESTATE.PLAYING) handleSmash();
+    });
+
+    // ===== ワニ出現処理 =====
+    function spawnNewTarget() {
+      if (gameState !== GAMESTATE.PLAYING) return;
+      if (targetTimer) clearTimeout(targetTimer);
+
+      activeTargetIndex = floor(random(NUM_TARGETS));
+      targetActive = true;
+      smashedTargetIndex = -1;
+
+      const elapsedTime = (millis() - startTime) / 1000;
+      const difficultyFactor = constrain(elapsedTime / GAME_DURATION, 0, 1);
+
+      const currentTargetDuration = map(difficultyFactor, 0, 1, TARGET_DURATION_MAX, TARGET_DURATION_MIN);
+      const maxInterval = map(difficultyFactor, 0, 1, SPAWN_INTERVAL_MAX, SPAWN_INTERVAL_MIN);
+      const nextSpawnDelay = 50 + random(maxInterval - 50);
+
+      targetTimer = setTimeout(() => {
+        targetActive = false;
+        activeTargetIndex = -1;
+        setTimeout(spawnNewTarget, nextSpawnDelay);
+      }, currentTargetDuration);
+    }
+
+    // ===== 結果表示 =====
+    function displayResult(message, col) {
+      if (resultTimer) clearTimeout(resultTimer);
+      resultMessage = message;
+      messageColor = col;
+      resultTimer = setTimeout(() => resultMessage = '', RESULT_DISPLAY_DURATION);
+    }
+
+    // ===== 叩き判定 =====
+    function handleSmash() {
+      isSmashingAnimation = true;
+      setTimeout(() => isSmashingAnimation = false, SMASH_ANIMATION_DURATION);
+
+      if (!targetActive) {
+        displayResult("MISS!", color(255, 100, 100));
+        return;
+      }
+
+      const activeX = targetPositions[activeTargetIndex];
+      const distance = dist(cursorX, TARGET_Y - CURSOR_SIZE / 2, activeX, TARGET_Y - TARGET_SIZE / 2);
+
+      if (distance < (TARGET_SIZE + CURSOR_SIZE) / 3 - HIT_TOLERANCE) {
+        score++;
+        document.querySelector("#score").innerHTML = score;
+        displayResult("HIT!", color(100, 255, 100));
+
+        smashedTargetIndex = activeTargetIndex;
+        targetActive = false;
+        clearTimeout(targetTimer);
+
+        const elapsedTime = (millis() - startTime) / 1000;
+        const difficultyFactor = constrain(elapsedTime / GAME_DURATION, 0, 1);
+        const maxInterval = map(difficultyFactor, 0, 1, SPAWN_INTERVAL_MAX, SPAWN_INTERVAL_MIN);
+        const nextSpawnDelay = 50 + random(maxInterval / 3);
+
+        setTimeout(spawnNewTarget, nextSpawnDelay);
+      } else {
+        displayResult("MISS!", color(255, 100, 100));
+      }
+    }
+
+    // ===== p5.js 初期設定 =====
+    function setup() {
+      createCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+      imageMode(CENTER);
+      let spacing = width / (NUM_TARGETS + 1);
+      for (let i = 0; i < NUM_TARGETS; i++) targetPositions.push((i + 1) * spacing);
+    }
+
+    // ===== メインループ =====
+    function draw() {
+      background(136, 192, 98);
+
+      // スマホ傾きでカーソル移動
+      cursorX = map(gamma, -30, 30, 0, width, true);
+      cursorX = constrain(cursorX, 0, width);
+
+      // タイマー管理
+      if (gameState === GAMESTATE.PLAYING) {
+        const elapsedTime = (millis() - startTime) / 1000;
+        countdownTime = GAME_DURATION - elapsedTime;
+        if (countdownTime <= 0) gameOver();
+        fill(0);
+        textSize(32);
+        textAlign(RIGHT, TOP);
+        text(`残り時間: ${countdownTime.toFixed(1)}`, width - 10, 10);
+        textAlign(LEFT, BASELINE);
+      }
+
+      // 穴の描画
+      fill(100, 50, 0);
+      noStroke();
+      targetPositions.forEach(x => ellipse(x, TARGET_Y + TARGET_SIZE / 4, TARGET_SIZE * 1.2, 30));
+
+      // ワニの描画
+      if (gameState === GAMESTATE.PLAYING) {
+        if (targetActive) image(img_wani_open, targetPositions[activeTargetIndex], TARGET_Y - TARGET_SIZE / 2, TARGET_SIZE, TARGET_SIZE);
+        if (smashedTargetIndex !== -1) image(img_wani_close, targetPositions[smashedTargetIndex], TARGET_Y - TARGET_SIZE / 2, TARGET_SIZE, TARGET_SIZE);
+      }
+
+      // 結果メッセージ
+      if (resultMessage) {
+        fill(messageColor);
+        textSize(64);
+        textAlign(CENTER, CENTER);
+        drawingContext.shadowBlur = 10;
+        drawingContext.shadowColor = 'black';
+        text(resultMessage, width / 2, height / 2);
+        drawingContext.shadowBlur = 0;
+        textAlign(LEFT, BASELINE);
+      }
+
+      // カウントダウン表示
+      if (gameState === GAMESTATE.COUNTDOWN) {
+        const countElapsed = (millis() - startCountdownStartTime) / 1000;
+        const remaining = COUNTDOWN_DURATION - countElapsed;
+        let displayNum = remaining <= 0 ? "START!" : ceil(remaining);
+        if (remaining <= 0) startGame();
+        fill(255);
+        textSize(120);
+        textAlign(CENTER, CENTER);
+        drawingContext.shadowBlur = 20;
+        drawingContext.shadowColor = 'red';
+        text(displayNum, width / 2, height / 2);
+        drawingContext.shadowBlur = 0;
+        textAlign(LEFT, BASELINE);
+      }
+
+      // ハンマー描画
+      const CURSOR_Y = TARGET_Y - CURSOR_SIZE * 1.5;
+      if (isSmashingAnimation) {
+        image(img_hammer_down, cursorX, CURSOR_Y + CURSOR_SIZE / 3, CURSOR_SIZE, CURSOR_SIZE);
+      } else {
+        image(img_hammer_up, cursorX, CURSOR_Y, CURSOR_SIZE, CURSOR_SIZE);
+      }
+    }
+  </script>
+</body>
+</html>

@@ -1,118 +1,174 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta http-equiv="Pragma" content="no-cache" />
-    <meta http-equiv="Expires" content="-1" />
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="-1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>スマホでワニたたき！</title>
 
-    <script type="module">
-      import { io } from "https://cdn.socket.io/4.5.1/socket.io.esm.min.js";
+  <script type="module">
+    import { io } from "https://cdn.socket.io/4.5.1/socket.io.esm.min.js";
 
-      document.addEventListener("DOMContentLoaded", () => {
-        let devid = sessionStorage.getItem('clientId');
-        if (!devid) {
-          devid = Math.random().toString(36).substring(2, 15);
-          sessionStorage.setItem('clientId', devid);
-        }
-        
-        let decPlaces = 2;
-        let interval = 50; // 20 fps
-        let alpha = 0,
-          beta = 0,
-          gamma = 0;
-        let z = 0;
+    document.addEventListener("DOMContentLoaded", () => {
+      // 各デバイスに固有のIDを付与
+      let devid = sessionStorage.getItem('clientId');
+      if (!devid) {
+        devid = Math.random().toString(36).substring(2, 15);
+        sessionStorage.setItem('clientId', devid);
+      }
 
-        const socket = io();
-        
-        // socket.emit("join", "game");
-        
-        document.querySelector("#contents").textContent =
-          "接続されました。あなたのIDは：" + devid;
-        document.querySelector("#content").style.backgroundColor =
-          getColorFromId(devid);
+      let decPlaces = 2;
+      let interval = 50; // センサーデータ送信間隔 (20fps)
+      let alpha = 0, beta = 0, gamma = 0, z = 0;
 
-        if (!("WebSocket" in window)) {
-          alert("ブラウザがWebSocketsをサポートしていません");
-        }
+      // 加速度による叩き検出用の変数
+      let last_z = 0;
+      let current_z = 0;
+      const TAP_THRESHOLD = 5.0;    // 叩き検出の閾値
+      const SMASH_INTERVAL = 300;   // 連続送信を防ぐ間隔 (ms)
+      let isSmashing = false;       // 連続叩き防止フラグ
 
-        document.querySelector("#connect").addEventListener("click", () => {
-          setInterval(() => {
-            socket.emit("sensor", {
-              id: devid,
-              a: alpha,
-              b: beta,
-              g: gamma,
-              z: z,
-            });
-          }, interval);
-          document.querySelector("#connect").style.display = "none";
-          request_permission();
-        });
+      const socket = io();
 
-        function getColorFromId(id) {
-          let hash = 0;
-          for (let i = 0; i < id.length; i++) {
-            hash = id.charCodeAt(i) + ((hash << 5) - hash);
+      document.querySelector("#contents").textContent =
+        "接続されました。あなたのIDは：" + devid;
+      document.querySelector("#content").style.backgroundColor =
+        getColorFromId(devid);
+
+      if (!("WebSocket" in window)) {
+        alert("ブラウザがWebSocketsをサポートしていません");
+      }
+
+      // 接続ボタン押下時の処理
+      document.querySelector("#connect").addEventListener("click", () => {
+
+        // 1. 傾き情報を定期的に送信
+        setInterval(() => {
+          socket.emit("sensor", { id: devid, a: alpha, b: beta, g: gamma, z: z });
+        }, interval);
+
+        // 2. 加速度による叩き検出処理
+        setInterval(() => {
+          current_z = parseFloat(z);
+          const z_diff = current_z - last_z;
+
+          if (z_diff < -TAP_THRESHOLD && !isSmashing) {
+            console.log("Smash detected! Z-diff:", z_diff.toFixed(2));
+            isSmashing = true;
+            socket.emit("smash", { id: devid });
+
+            // 一定時間叩き検出を無効化
+            setTimeout(() => {
+              isSmashing = false;
+            }, SMASH_INTERVAL);
           }
-          const h = Math.abs(hash % 360);
-          return `hsl(${h}, 60%, 65%)`;
-        }
+          last_z = current_z;
+        }, interval);
 
-        window.ondevicemotion = (event) => {
-          z = event.accelerationIncludingGravity.z.toFixed(decPlaces);
-        };
-
-        window.ondeviceorientation = (event) => {
-          alpha = event.alpha.toFixed(decPlaces);
-          beta = event.beta.toFixed(decPlaces);
-          gamma = event.gamma.toFixed(decPlaces);
-        };
-
-        function request_permission() {
-          if (
-            DeviceMotionEvent &&
-            typeof DeviceMotionEvent.requestPermission === "function"
-          ) {
-            DeviceMotionEvent.requestPermission();
-          }
-          if (
-            DeviceOrientationEvent &&
-            typeof DeviceOrientationEvent.requestPermission === "function"
-          ) {
-            DeviceOrientationEvent.requestPermission();
-          }
-        }
+        document.querySelector("#connect").style.display = "none";
+        request_permission();
       });
-    </script>
 
-    <style>
-      #connect {
-        width: 15%;
-        height: 24px;
+      // 各デバイスに固有の色を割り当て
+      function getColorFromId(id) {
+        let hash = 0;
+        for (let i = 0; i < id.length; i++) {
+          hash = id.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const h = Math.abs(hash % 360);
+        return `hsl(${h}, 60%, 65%)`;
       }
-      #content {
-        background-color: #ccc;
-      }
-      .space {
-        height: 24px;
-      }
-    </style>
-  </head>
 
-  <body>
-    <center>
-      <div id="content">
+      // 加速度センサー値の取得
+      window.ondevicemotion = (event) => {
+        z = event.accelerationIncludingGravity.z.toFixed(decPlaces);
+      };
+
+      // 傾きセンサー値の取得
+      window.ondeviceorientation = (event) => {
+        alpha = event.alpha.toFixed(decPlaces);
+        beta = event.beta.toFixed(decPlaces);
+        gamma = event.gamma.toFixed(decPlaces);
+      };
+
+      // iOS向けセンサー利用許可リクエスト
+      function request_permission() {
+        if (DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === "function") {
+          DeviceMotionEvent.requestPermission();
+        }
+        if (DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === "function") {
+          DeviceOrientationEvent.requestPermission();
+        }
+      }
+    });
+  </script>
+
+  <style>
+    body {
+      min-height: 100vh;
+      margin: 0;
+      font-family: sans-serif;
+      text-align: center;
+    }
+
+    #connect {
+      width: 15%;
+      height: 24px;
+    }
+
+    #content {
+      background-color: #ccc;
+    }
+
+    .space {
+      height: 24px;
+    }
+
+    /* 説明文の枠スタイル */
+    #game-info {
+      width: 80%;
+      max-width: 400px;
+      text-align: left;
+      margin: 20px auto;
+      padding: 10px;
+      border: 1px solid #aaa;
+      background-color: #eee;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <center>
+    <h2>傾けて狙え！<br>🐊スマホでワニたたき！🐊</h2>
+
+    <div id="game-info">
+      <h3>ゲームのルール</h3>
+      <ul>
+        <li>制限時間30秒で、穴から出てくるワニをハンマーで叩きましょう。</li>
+        <li>時間経過とともにワニの出現速度が上がります。</li>
+      </ul>
+      <h3>操作方法</h3>
+      <ul>
+        <li>開始姿勢: スマートフォンを地面と水平に、画面が天井を向くように持ちます。</li>
+        <li>移動: スマートフォンを左右に傾けてハンマーを動かします。</li>
+        <li>叩く: スマホの上部を下に素早く振り下ろす動作で叩きます。</li>
+      </ul>
+    </div>
+
+    <div id="content">
+      <div class="space"></div>
+      <input id="connect" type="button" value="接続" />
+      <div>
         <div class="space"></div>
-        <input id="connect" type="button" value="接続" />
-        <div>
-          <div class="space"></div>
-          <p id="contents">デバイスを傾けて下さい</p>
-        </div>
+        <p id="contents">デバイスを傾けて下さい</p>
       </div>
-      <div id="footer">
-        <h4>スマホセンサー</h4>
-      </div>
-    </center>
-  </body>
+    </div>
+
+    <div id="footer">
+      <h4>スマホセンサー</h4>
+    </div>
+  </center>
+</body>
 </html>

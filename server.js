@@ -19,17 +19,24 @@ io.on('connection', (socket) => {
   socket.on('chat message', (msg) => {
     io.emit('chat message', msg);
   });
-  
+
   // Room functionality (for sensor apps)
   socket.on('join', (room) => {
     socket.join(room);
     console.log(`Client joined room: ${room}`);
   });
-  
+
   // Sensor data handling
   socket.on('sensor', (data) => {
     // センサーデータを'game'ルームにいる他のクライアントに送信する
     socket.to('game').emit('sensor', data);
+  });
+
+  socket.on('smash', (data) => {
+    // サーバーが受信した 'smash' イベントを、他の全員に再送（ブロードキャスト）
+    socket.to('game').emit('smash', data);
+    // あるいは、特定のゲームルームに参加している全員に送信
+    // io.to('game').emit('smash', data);
   });
 
   socket.on('disconnect', () => {
